@@ -3,7 +3,8 @@ import random
 import sys
 
 # Initialize Pygame
-pygame.init()
+pygame.display.init()
+pygame.font.init()
 
 # Constants
 WIDTH, HEIGHT = 1200, 1200
@@ -19,7 +20,10 @@ GRAY = (200, 200, 200)
 RED = (255, 0, 0)
 
 # Initialize screen
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+screen_size = min(pygame.display.Info().current_w, pygame.display.Info().current_h)
+screen = pygame.display.set_mode(
+    (screen_size * 0.8, screen_size * 0.8), pygame.RESIZABLE
+)
 pygame.display.set_caption("Egyptian War")
 clock = pygame.time.Clock()
 
