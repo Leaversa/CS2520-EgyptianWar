@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 import pygame
 from asyncio import Queue, CancelledError
@@ -217,12 +218,7 @@ async def pyg_draw(game: CardGame):
 
         game.draw(screen)
         pygame.display.flip()
-
-        # Necessary to tell pygame we're still alive.
-        #
-        # Normally, taking events out of the pygame event queue does that
-        # automatically, but that doesn't work when the events are
-        # extracted in a background thread/process.
+        # Minimizes screen resize damage
         pygame.event.pump()
 
 
@@ -253,48 +249,63 @@ async def handle_server_outgoing(
         await socket.send(await send_queue.get())
 
 
-# The looping functions above are assembled together and
-# scheduled in asyncio's event loop so they can run
+# The looping functions above are assembled together and will
+# be scheduled in an asyncio event loop so they can run
 # asynchronously.
 
 
-async def main():
+def intiailize_asyncio(
+    loop: asyncio.AbstractEventLoop,
+    recv_queue: Queue[pygame.event.Event],
+    send_queue: Queue[ClientMessage],
+    game: CardGame,
+):
+    """Uses `loop` as the asyncio event loop for asyncio_main."""
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(asyncio_main(recv_queue, send_queue, game))
+
+
+async def asyncio_main(
+    recv_queue: Queue[pygame.event.Event],
+    send_queue: Queue[ClientMessage],
+    game: CardGame,
+):
+    """Handles drawing the pygame display, pygame events, incoming/outgoing server events."""
+    async with websockets.connect("ws://localhost:8765") as socket:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(pyg_draw(game))
+            tg.create_task(handle_pyg_events(recv_queue, game))
+            tg.create_task(handle_server_incoming(socket))
+            tg.create_task(handle_server_outgoing(socket, send_queue))
+
+
+def main():
     send_queue: Queue[ClientMessage] = Queue()
     recv_queue: Queue[pygame.event.Event] = Queue()
-
     game = CardGame(send_queue)
 
-    loop = asyncio.get_running_loop()
-    # pygame's event loop can't be defined in an async manner, i.e.,
-    # waiting for the next pygame event is blocking and has no await
-    # capabilities.
-    #
-    # Placing it in asyncio's event loop would result in it blocking
-    # because there's no way to know when context switching is available
-    #
-    # The solution here is to use run_in_executor(...) and run it in a
-    # separate thread/process.
-    loop.run_in_executor(None, pyg_event_loop, loop, recv_queue)
+    # Run initialize_asyncio() in a separate thread
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(
+        target=intiailize_asyncio,
+        args=(
+            loop,
+            recv_queue,
+            send_queue,
+            game,
+        ),
+    )
+    thread.start()
 
-    try:
-        async with websockets.connect("ws://localhost:8765") as socket:
-            async with asyncio.TaskGroup() as tg:
-                draw_task = tg.create_task(pyg_draw(game))
-                event_task = tg.create_task(handle_pyg_events(recv_queue, game))
-                sinc_task = tg.create_task(handle_server_incoming(socket))
-                sout_task = tg.create_task(
-                    handle_server_outgoing(socket, send_queue)
-                )
-    # I tried really hard but couldn't figure out how to cleanly exit
-    # whether through the window close button or ctrl+c :(
-    #
-    # Killing the terminal works
-    except Exception as error:
-        print("Err", error)
-        pygame.event.post(pygame.event.Event(pygame.QUIT))
+    # Forward pygame events to the other thread
+    while True:
+        event = pygame.event.wait()
+        asyncio.run_coroutine_threadsafe(recv_queue.put(event), loop)
+        if event.type == pygame.QUIT:
+            break
 
     pygame.quit()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
