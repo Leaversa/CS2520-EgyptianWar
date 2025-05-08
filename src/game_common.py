@@ -1,7 +1,7 @@
 from typing import Literal, TypedDict
 
 RANKS = [
-    "A",
+    "ace",
     "2",
     "3",
     "4",
@@ -57,10 +57,10 @@ Player = Literal["self", "opponent"]
 
 GameState = Literal["start", "playing", "game_over"]
 
+
 class GameStatus(TypedDict):
     kind: Literal["state"]
     turn: Player
     self_hand: int
     op_hand: int
     pile: Cards
-
