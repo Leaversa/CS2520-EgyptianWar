@@ -1,13 +1,13 @@
 import asyncio
+from concurrent.futures import Future
 import json
-import time
+import threading
 import pygame
-from asyncio import Queue, CancelledError
-from typing import cast
+from asyncio import Queue
+from typing import cast, Callable
 
 import websockets
 from websockets import ClientConnection
-from websockets.exceptions import ConnectionClosed
 
 from game_common import (
     RANKS,
@@ -94,8 +94,8 @@ class Button:
 
 
 class CardGame:
-    def __init__(self, send_queue: Queue[ClientMessage]):
-        self.send_queue = send_queue
+    def __init__(self, send: Callable[[ClientMessage], Future[None]]):
+        self.send = send
 
         self.self_hand = 0
         self.opponent_hand = 0
@@ -109,21 +109,21 @@ class CardGame:
         self.slap_button = Button("SLAP!", 200, 500, *BUTTON_SIZE)
         self.new_game_button = Button("New Game", 350, 500, *BUTTON_SIZE)
 
-    async def handle_events(self, event: pygame.event.Event):
+    def handle_events(self, event: pygame.event.Event):
         if (
             event.type == pygame.MOUSEBUTTONDOWN
             and self.game_state == "playing"
         ):
             if self.play_button.rect.collidepoint(event.pos):
-                await self.send_queue.put("pile")
+                self.send("pile")
             elif self.slap_button.rect.collidepoint(event.pos):
-                await self.send_queue.put("slap")
+                self.send("slap")
         elif event.type == pygame.MOUSEBUTTONDOWN and self.game_state in [
             "start",
             "game_over",
         ]:
             if self.new_game_button.rect.collidepoint(event.pos):
-                await self.send_queue.put("restart")
+                self.send("restart")
         elif event.type == SERVERMSG:
             type = event.dict["kind"]
             match type:
@@ -148,8 +148,7 @@ class CardGame:
             # Show last 5 cards in the pile with rotation
             num_cards_to_show = min(5, len(self.pile))
             for i in range(num_cards_to_show):
-                card_index = len(self.pile) - num_cards_to_show + i
-                card = cards[self.pile[card_index]]
+                card = cards[self.pile[-num_cards_to_show + i]]
 
                 # Calculate rotation angle (in degrees)
                 rotation_angle = i * 5  # 5 degrees per card
@@ -193,48 +192,20 @@ class CardGame:
             )
 
 
-def pyg_event_loop(
-    loop: asyncio.AbstractEventLoop,
-    recv_queue: Queue[pygame.event.Event],
+def intiailize_asyncio(
+    loop: asyncio.AbstractEventLoop, send_queue: Queue[ClientMessage]
 ):
-    """Forwards pygame events to `recv_queue`. This is a blocking function."""
-    while True:
-        event = pygame.event.wait()
-        asyncio.run_coroutine_threadsafe(recv_queue.put(event), loop)
-        if event.type == pygame.QUIT:
-            break
+    """Uses `loop` as the asyncio event loop for asyncio_main."""
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(asyncio_main(send_queue))
 
 
-async def pyg_draw(game: CardGame):
-    """Continuously draws the pygame display."""
-    current_time = 0
-    while True:
-        last_time = current_time
-        current_time = time.time()
-        elapsed = current_time - last_time
-        # Async version of pygame.clock.tick(FPS)
-        await asyncio.sleep(min(SPF - (elapsed - SPF), SPF))
-
-        game.draw(screen)
-        pygame.display.flip()
-
-        # Necessary to tell pygame we're still alive.
-        #
-        # Normally, taking events out of the pygame event queue does that
-        # automatically, but that doesn't work when the events are
-        # extracted in a background thread/process.
-        pygame.event.pump()
-
-
-async def handle_pyg_events(
-    recv_queue: Queue[pygame.event.Event], game: CardGame
-):
-    """Handles pygame events."""
-    while True:
-        event = await recv_queue.get()
-        if event.type == pygame.QUIT:
-            break
-        await game.handle_events(event)
+async def asyncio_main(send_queue: Queue[ClientMessage]):
+    """Handles incoming and outgoing server messages"""
+    async with websockets.connect("ws://localhost:8765") as socket:
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(handle_server_incoming(socket))
+            tg.create_task(handle_server_outgoing(socket, send_queue))
 
 
 async def handle_server_incoming(socket: ClientConnection):
@@ -253,48 +224,35 @@ async def handle_server_outgoing(
         await socket.send(await send_queue.get())
 
 
-# The looping functions above are assembled together and
-# scheduled in asyncio's event loop so they can run
-# asynchronously.
-
-
-async def main():
+def main():
     send_queue: Queue[ClientMessage] = Queue()
-    recv_queue: Queue[pygame.event.Event] = Queue()
 
-    game = CardGame(send_queue)
+    # Run initialize_asyncio() in a separate thread
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(
+        target=intiailize_asyncio, args=(loop, send_queue)
+    )
+    thread.start()
 
-    loop = asyncio.get_running_loop()
-    # pygame's event loop can't be defined in an async manner, i.e.,
-    # waiting for the next pygame event is blocking and has no await
-    # capabilities.
-    #
-    # Placing it in asyncio's event loop would result in it blocking
-    # because there's no way to know when context switching is available
-    #
-    # The solution here is to use run_in_executor(...) and run it in a
-    # separate thread/process.
-    loop.run_in_executor(None, pyg_event_loop, loop, recv_queue)
+    game = CardGame(
+        lambda msg: asyncio.run_coroutine_threadsafe(send_queue.put(msg), loop)
+    )
 
-    try:
-        async with websockets.connect("ws://localhost:8765") as socket:
-            async with asyncio.TaskGroup() as tg:
-                draw_task = tg.create_task(pyg_draw(game))
-                event_task = tg.create_task(handle_pyg_events(recv_queue, game))
-                sinc_task = tg.create_task(handle_server_incoming(socket))
-                sout_task = tg.create_task(
-                    handle_server_outgoing(socket, send_queue)
-                )
-    # I tried really hard but couldn't figure out how to cleanly exit
-    # whether through the window close button or ctrl+c :(
-    #
-    # Killing the terminal works
-    except Exception as error:
-        print("Err", error)
-        pygame.event.post(pygame.event.Event(pygame.QUIT))
+    clock = pygame.time.Clock()
+    while True:
+        try:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt
+                game.handle_events(event)
 
-    pygame.quit()
+            game.draw(screen)
+            pygame.display.flip()
+            clock.tick(FPS)
+        except KeyboardInterrupt:
+            pygame.quit()
+            loop.call_soon_threadsafe(loop.stop)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
