@@ -2,7 +2,6 @@ import asyncio
 from concurrent.futures import Future
 import json
 import threading
-import time
 import pygame
 from asyncio import Queue
 from typing import cast, Callable
@@ -97,7 +96,7 @@ class Button:
 class CardGame:
     def __init__(self, send: Callable[[ClientMessage], Future[None]]):
         self.send = send
-        
+
         self.self_hand = 0
         self.opponent_hand = 0
         self.turn: Player = "self"
@@ -194,8 +193,8 @@ class CardGame:
 
 
 def intiailize_asyncio(
-    loop: asyncio.AbstractEventLoop,
-    send_queue: Queue[ClientMessage]):
+    loop: asyncio.AbstractEventLoop, send_queue: Queue[ClientMessage]
+):
     """Uses `loop` as the asyncio event loop for asyncio_main."""
     asyncio.set_event_loop(loop)
     loop.run_until_complete(asyncio_main(send_queue))
@@ -230,21 +229,29 @@ def main():
 
     # Run initialize_asyncio() in a separate thread
     loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=intiailize_asyncio, args=(loop, send_queue))
+    thread = threading.Thread(
+        target=intiailize_asyncio, args=(loop, send_queue)
+    )
     thread.start()
 
-    game = CardGame(lambda msg: asyncio.run_coroutine_threadsafe(send_queue.put(msg), loop))
+    game = CardGame(
+        lambda msg: asyncio.run_coroutine_threadsafe(send_queue.put(msg), loop)
+    )
 
     clock = pygame.time.Clock()
     while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-            game.handle_events(event)
-        
-        game.draw(screen)
-        pygame.display.flip()
-        clock.tick(FPS)
+        try:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise KeyboardInterrupt
+                game.handle_events(event)
+
+            game.draw(screen)
+            pygame.display.flip()
+            clock.tick(FPS)
+        except KeyboardInterrupt:
+            pygame.quit()
+            loop.call_soon_threadsafe(loop.stop)
 
 
 if __name__ == "__main__":
