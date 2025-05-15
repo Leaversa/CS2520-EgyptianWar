@@ -99,7 +99,6 @@ class Button:
         surface.blit(text_surf, text_rect)
 
 
-
 class CardGame:
     def __init__(self, send: Callable[[ClientMessage], Future[None]]):
         self.send = send
@@ -110,11 +109,11 @@ class CardGame:
 
         self.pile = []
         self.game_state: GameState = "start"
-        
+
         # Slap feedback
         self.last_slap_result = None
         self.slap_message_time = 0
-        
+
         # Battle state
         self.battle_active = False
         self.battle_face_card = None
@@ -137,12 +136,24 @@ class CardGame:
             ]
 
     def handle_events(self, event: pygame.event.Event):
-        if event.type == pygame.MOUSEBUTTONDOWN and self.game_state == "playing":
-            if self.play_button.rect.collidepoint(event.pos) and self.turn == "self":
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and self.game_state == "playing"
+        ):
+            if (
+                self.play_button.rect.collidepoint(event.pos)
+                and self.turn == "self"
+            ):
+                # Only send pile message if it's our turn
                 self.send("pile")
+                # Disable the play button until we get the next state update
+                self.play_button.enabled = False
             elif self.slap_button.rect.collidepoint(event.pos):
                 self.send("slap")
-        elif event.type == pygame.MOUSEBUTTONDOWN and self.game_state in ["start", "game_over"]:
+        elif event.type == pygame.MOUSEBUTTONDOWN and self.game_state in [
+            "start",
+            "game_over",
+        ]:
             if self.new_game_button.rect.collidepoint(event.pos):
                 self.send("restart")
         elif event.type == SERVERMSG:
@@ -154,7 +165,13 @@ class CardGame:
                     self.self_hand = status["self_hand"]
                     self.opponent_hand = status["op_hand"]
                     self.pile = status["pile"]
-                    self.game_state = "playing" if self.self_hand and self.opponent_hand else "game_over"
+                    self.game_state = (
+                        "playing"
+                        if self.self_hand and self.opponent_hand
+                        else "game_over"
+                    )
+                    # Re-enable the play button when we get a state update
+                    self.play_button.enabled = True
                 case "slap_result":
                     self.last_slap_result = event.dict["result"]
                     self.slap_message_time = pygame.time.get_ticks()
@@ -189,27 +206,29 @@ class CardGame:
         font = pygame.font.Font(None, 36)
 
         turn_text = font.render(
-            f"Current turn: {'Yours' if self.turn == 'self' else 'Opponent\'s'}",
+            f"Current turn: {'Yours' if self.turn == 'self' else "Opponent's"}",
             True,
-            WHITE
+            WHITE,
         )
         turn_x = screen_rect.centerx - turn_text.get_width() // 2
         turn_y = 20
         screen.blit(turn_text, (turn_x, turn_y))
 
-        opponent_text = font.render(f"Opponent's cards: {self.opponent_hand}", True, WHITE)
+        opponent_text = font.render(
+            f"Opponent's cards: {self.opponent_hand}", True, WHITE
+        )
         opponent_x = screen_rect.right - opponent_text.get_width() - 20
         opponent_y = 20
         screen.blit(opponent_text, (opponent_x, opponent_y))
 
         player_text = font.render(f"Your cards: {self.self_hand}", True, WHITE)
-        player_x = 50 
+        player_x = 50
         player_y = 590
         screen.blit(player_text, (player_x, player_y))
 
         # Draw buttons
         if self.game_state == "playing":
-            self.play_button.color = DISABLE if self.turn != 'self' else GRAY
+            self.play_button.color = DISABLE if self.turn != "self" else GRAY
             self.play_button.draw(screen)
             self.slap_button.draw(screen)
         else:
@@ -219,28 +238,48 @@ class CardGame:
         if self.game_state == "game_over":
             message = "You won!" if self.self_hand else "You lost!"
             text = font.render(message, True, RED)
-            screen.blit(text, (WIDTH // 2 - text.get_width() // 2, HEIGHT // 2 - 20))
-            
+            screen.blit(
+                text, (WIDTH // 2 - text.get_width() // 2, HEIGHT // 2 - 20)
+            )
+
         # Show slap result message if recent
-        if self.last_slap_result and pygame.time.get_ticks() - self.slap_message_time < 2000:
-            msg = "Good slap!" if self.last_slap_result == "correct" else "Bad slap!"
-            color = (0, 255, 0) if self.last_slap_result == "correct" else (255, 0, 0)
+        if (
+            self.last_slap_result
+            and pygame.time.get_ticks() - self.slap_message_time < 2000
+        ):
+            msg = (
+                "Good slap!"
+                if self.last_slap_result == "correct"
+                else "Bad slap!"
+            )
+            color = (
+                (0, 255, 0)
+                if self.last_slap_result == "correct"
+                else (255, 0, 0)
+            )
             slap_text = font.render(msg, True, color)
-            screen.blit(slap_text, (WIDTH // 2 - slap_text.get_width() // 2, 500))
-            
+            screen.blit(
+                slap_text, (WIDTH // 2 - slap_text.get_width() // 2, 500)
+            )
+
         # Draw battle indicator if active
         if self.battle_active and self.battle_face_card:
             battle_font = pygame.font.Font(None, 32)
             battle_text = battle_font.render(
                 f"BATTLE! Play {self.battle_remaining} cards for {self.battle_face_card}",
                 True,
-                (255, 215, 0))
-            screen.blit(battle_text, (WIDTH // 2 - battle_text.get_width() // 2, HEIGHT - 100))
-            
+                (255, 215, 0),
+            )
+            screen.blit(
+                battle_text,
+                (WIDTH // 2 - battle_text.get_width() // 2, HEIGHT - 100),
+            )
+
             # Add flashing effect during battle
             overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             overlay.fill((255, 215, 0, 30))
             screen.blit(overlay, (0, 0))
+
 
 def intiailize_asyncio(
     loop: asyncio.AbstractEventLoop, send_queue: Queue[ClientMessage]

@@ -55,16 +55,19 @@ class GameServer:
                         self._game.__init__()
                         await self.send_all_game_status()
                     case "pile":
-                        self._game.play_card(player)
-                        await self.send_all_game_status()
+                        # Only process pile message if it's actually the player's turn
+                        if player == self._game.turn:
+                            self._game.play_card(player)
+                            await self.send_all_game_status()
                     case "slap":
                         result = self._game.slap(player)
                         # Broadcast slap_result to all clients
                         for conn in self._connections:
-                            await conn.send(json.dumps({
-                                "kind": "slap_result",
-                                "result": result
-                            }))
+                            await conn.send(
+                                json.dumps(
+                                    {"kind": "slap_result", "result": result}
+                                )
+                            )
                         await self.send_all_game_status()
 
         except ConnectionClosedError:
@@ -74,8 +77,6 @@ class GameServer:
         for socket in self._connections:
             await socket.close()
         self._connections = []
-
-
 
     def num_players(self) -> int:
         """Gets number of clients connected to the server."""
@@ -99,6 +100,7 @@ class CardGame:
         self.opponent_hand: Cards = []
         self.pile: Cards = []
         self.turn: Player = "self"
+        self.royal_cards_needed: int = -1  # -1 means no royal cards needed
 
         # Create and shuffle deck first
         self.create_deck()
@@ -132,6 +134,7 @@ class CardGame:
             len(self.pile) >= 2
             and self.pile[-1].split("_")[0] == self.pile[-2].split("_")[0]
         ):
+            print("doubles", self.pile[-1], self.pile[-2])
             return True
 
         # Check for sandwiches (same rank with one card in between)
@@ -139,6 +142,7 @@ class CardGame:
             len(self.pile) >= 3
             and self.pile[-1].split("_")[0] == self.pile[-3].split("_")[0]
         ):
+            print("sandwich", self.pile[-1], self.pile[-3])
             return True
 
         # Check for top and bottom (same rank on top and bottom of pile)
@@ -146,8 +150,9 @@ class CardGame:
             len(self.pile) >= 2
             and self.pile[0].split("_")[0] == self.pile[-1].split("_")[0]
         ):
+            print("top and bottom", self.pile[0], self.pile[-1])
             return True
-
+        print("no valid slap")
         return False
 
     def play_card(self, player: Player):
@@ -155,9 +160,49 @@ class CardGame:
         Moves a card in the players hand to the pile.
         Does nothing if not the player's turn or hand is empty.
         """
+        royal_cards = {
+            "ace": 4,
+            "king": 3,
+            "queen": 2,
+            "jack": 1,
+        }
+
         if player == self.turn and self.hand(player):
-            self.pile.append(self.hand(player).pop(0))
-            self.turn = "self" if self.turn == "opponent" else "opponent"
+            played_card = self.hand(player).pop(0)
+            self.pile.append(played_card)
+            print(played_card)
+
+            card_rank = played_card.split("_")[0]
+
+            # Check if the card played is a royal card
+            if card_rank in royal_cards:
+                # Reset the number of cards needed to the rank of the card played
+                self.royal_cards_needed = royal_cards[card_rank]
+
+                print(
+                    f"Royal card played: {card_rank}, {self.royal_cards_needed} cards needed"
+                )
+
+                # Switch turns when a royal card is played
+                self.turn = "opponent" if self.turn == "self" else "self"
+            elif self.royal_cards_needed > 0:
+                # If the card played is not a royal card, and the number of cards needed is greater than 0,
+                # Decrement the number of cards needed
+                self.royal_cards_needed -= 1
+                # Keep the same player's turn since they haven't played a royal card
+                # and they have not met the number of cards needed
+            elif self.royal_cards_needed == 0:
+                # If no royal card sequence is in progress, give the pile to the other player
+                self.royal_cards_needed = -1
+                other_player = "opponent" if player == "self" else "self"
+                self.hand(other_player).extend(self.pile)
+                self.pile = []
+                # Switch turns after giving the pile
+                self.turn = other_player
+            else:
+                # If the card played is not a royal card, and no cards needed,
+                # Switch turns
+                self.turn = "opponent" if player == "self" else "self"
 
     def slap(self, player: Player):
         """
@@ -168,10 +213,15 @@ class CardGame:
         if self.is_valid_slap():
             hand.extend(self.pile)
             self.pile = []
+            # Interrupt the royal card sequence if it was in progress
+            self.royal_cards_needed = -1
+            print("slap successful")
             return "correct"
         elif hand:
             self.pile.append(hand.pop(0))
+            print("slap incorrect")
             return "incorrect"
+        print("slap incorrect")
         return "incorrect"
 
     def hand(self, player: Player):
