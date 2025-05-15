@@ -36,22 +36,16 @@ class GameServer:
             print("Closing server...")
 
     async def handle_events(self, socket: ServerConnection):
-        """When a client connects, the connection to that client is passed to this handler."""
-        # Close connection if lobby is already full.
         if self.num_players() == 2:
             return
 
         self._connections.append(socket)
 
-        # First player to join is referred to as self for CardGame class
-        # Second player to join is referred to as opponent for CardGame class
         player: Player = "self" if self.num_players() == 1 else "opponent"
 
-        # If full lobby, start game.
         if self.num_players() == 2:
             await self.send_all_game_status()
 
-        # Handles messages from client as they come in.
         try:
             async for message in socket:
                 action = cast(ClientMessage, message)
@@ -59,11 +53,20 @@ class GameServer:
                 match action:
                     case "restart":
                         self._game.__init__()
+                        await self.send_all_game_status()
                     case "pile":
                         self._game.play_card(player)
+                        await self.send_all_game_status()
                     case "slap":
-                        self._game.slap(player)
-                await self.send_all_game_status()
+                        result = self._game.slap(player)
+                        # Broadcast slap_result to all clients
+                        for conn in self._connections:
+                            await conn.send(json.dumps({
+                                "kind": "slap_result",
+                                "result": result
+                            }))
+                        await self.send_all_game_status()
+
         except ConnectionClosedError:
             pass
 
@@ -71,6 +74,8 @@ class GameServer:
         for socket in self._connections:
             await socket.close()
         self._connections = []
+
+
 
     def num_players(self) -> int:
         """Gets number of clients connected to the server."""
@@ -163,8 +168,11 @@ class CardGame:
         if self.is_valid_slap():
             hand.extend(self.pile)
             self.pile = []
+            return "correct"
         elif hand:
             self.pile.append(hand.pop(0))
+            return "incorrect"
+        return "incorrect"
 
     def hand(self, player: Player):
         """Gets the hand of `player`"""
